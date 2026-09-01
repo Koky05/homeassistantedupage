@@ -165,6 +165,28 @@ class EduPageNotificationSensor(CoordinatorEntity, SensorEntity):
                 subject = event.additional_data.get("predmetid") if event.additional_data else None
                 attributes[f"event_{i+1}_subject"] = self._subjects.get(int(subject)) if subject else None
 
+        # Structured, aggregated list of all events (any type) - convenient for
+        # templates and dashboards, e.g. `state_attr(..., 'events')`.
+        events = []
+        for event in self._notifications:
+            item = {
+                "id": event.event_id,
+                "type": event.event_type,
+                "text": event.text,
+                "timestamp": event.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            if event.additional_data:
+                if "date" in event.additional_data:
+                    item["deadline"] = event.additional_data["date"]
+                if "predmetid" in event.additional_data:
+                    subject_name = self._subjects.get(int(event.additional_data["predmetid"]))
+                    if subject_name:
+                        item["subject"] = subject_name
+            if event.author:
+                item["author"] = event.author
+            events.append(item)
+        attributes["events"] = events
+
         return attributes
 
 class EventType:
