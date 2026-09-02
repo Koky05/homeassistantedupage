@@ -53,13 +53,11 @@ def coordinator(hass: HomeAssistant):
 
 
 def _make_sensor(coordinator, notifications=None):
-    subjects = coordinator.data["subjects"]
     return EduPageNotificationSensor(
         coordinator,
         student_id=1,
         student_name="Max Kovaľ",
         notifications=notifications if notifications is not None else [],
-        subjects=subjects,
     )
 
 

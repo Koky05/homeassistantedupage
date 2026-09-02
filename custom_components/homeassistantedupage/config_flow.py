@@ -159,6 +159,7 @@ class EdupageConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="two_factor",
             data_schema=schema,
             errors=errors,
+            description_placeholders={"hint": "Enter the confirmation code from the EduPage app."},
         )
 
     async def _finalize_setup(self, api, user_input):
@@ -211,7 +212,7 @@ class EdupageConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Triggered when Home Assistant detects an expired/invalid stored session.
 
         Reuses the reconfigure flow, which re-logs-in (prompting for a 2FA code
-        if the account has 2FA enabled), updates the stored PHPSESSID and reloads
+        if the account has 2FA enabled), stores a fresh PHPSESSID and reloads
         the config entry. Completed as a reauthentication so the user is not
         asked to re-enter their credentials.
         """

@@ -1,127 +1,230 @@
 import logging
-import asyncio
-from edupage_api import Login
+from datetime import date, datetime
+
 from edupage_api import Edupage as APIEdupage
-from edupage_api.exceptions import BadCredentialsException, CaptchaException, SecondFactorFailedException
+from edupage_api import Login
+from edupage_api.exceptions import (
+    BadCredentialsException,
+    CaptchaException,
+    SecondFactorFailedException,
+)
+
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 _LOGGER = logging.getLogger(__name__)
 
+
+class EdupageSessionExpired(UpdateFailed):
+    """Raised when the stored PHPSESSID is invalid/expired.
+
+    Subclass of UpdateFailed so the DataUpdateCoordinator still treats it as a
+    failed update, but it can be caught separately in __init__ to trigger
+    Home Assistant's reauthentication flow.
+    """
+
+
 class Edupage:
-    def __init__(self,hass, sessionid = ''):
+    """Async wrapper around the edupage-api library.
+
+    Runtime polling is deliberately session-only: a fresh PHPSESSID obtained
+    during the config flow (after 2FA) is reused via `Login.reload_data`.
+    We never call `api.login()` at runtime so a 2FA prompt is never re-triggered
+    by the 30-minute coordinator poll. If the stored session turns out to be
+    expired we signal that with EdupageSessionExpired so the integration can
+    start the reauth flow.
+    """
+
+    def __init__(self, hass, sessionid=""):
         self.hass = hass
         self.sessionid = sessionid
         self.api = APIEdupage()
 
-    async def login(self, username: str, password: str, subdomain: str):
-        """Perform login asynchronously.
-
-        Raises auth-related exceptions (BadCredentialsException, CaptchaException,
-        SecondFactorFailedException) upward so the caller can trigger
-        reauthentication, instead of swallowing them and returning False.
-        """
+    def _load_session(self, subdomain, sessionid, username):
+        """Reload a stored EduPage session synchronously."""
         login = Login(self.api)
-        await self.hass.async_add_executor_job(
-            login.reload_data, subdomain, self.sessionid, username
-        )
-        if not self.api.is_logged_in:
-            # A stored session is no longer valid: fall back to a full login.
-            # For accounts with 2FA this prompts for a new confirmation code.
+        login.reload_data(subdomain, sessionid, username)
+
+    async def login(self, username, password, subdomain, sessionid):
+        """Load the stored session. Never starts username/password login."""
+        self.sessionid = sessionid
+        try:
             await self.hass.async_add_executor_job(
-                self.api.login, username, password, subdomain
+                self._load_session, subdomain, sessionid, username
             )
-        _LOGGER.debug("EDUPAGE Login successful")
-        return True
+            if not self.api.is_logged_in:
+                _LOGGER.error(
+                    "EDUPAGE stored session is invalid or expired; "
+                    "re-authenticate to refresh it."
+                )
+                raise EdupageSessionExpired(
+                    "EduPage session expired; please re-authenticate."
+                )
+            _LOGGER.debug("EDUPAGE session loaded for %s@%s", username, subdomain)
+            return True
+        except BadCredentialsException as e:
+            _LOGGER.error(
+                "EDUPAGE stored session is invalid or expired: %s. "
+                "Re-authenticate to refresh the session.",
+                e,
+            )
+            raise EdupageSessionExpired(
+                "EduPage session invalid/expired; please re-authenticate the "
+                "integration to refresh it."
+            ) from e
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.error("EDUPAGE unexpected session-load error: %s", e)
+            raise UpdateFailed(f"EduPage session load failed: {e}") from e
 
     async def get_classes(self):
-
         try:
-            classes_data = await self.hass.async_add_executor_job(self.api.get_classes)
-            return classes_data
-        except Exception as e:
-            raise UpdateFailed(F"EDUPAGE error updating get_classes() data from API: {e}")
+            return await self.hass.async_add_executor_job(self.api.get_classes)
+        except Exception as e:  # noqa: BLE001
+            raise UpdateFailed(f"EDUPAGE error updating get_classes() data from API: {e}")
 
     async def get_grades(self):
-
         try:
-            grades = await self.hass.async_add_executor_job(self.api.get_grades)
-            return grades
-        except Exception as e:
-            raise UpdateFailed(F"EDUPAGE error updating get_grades() data from API: {e}")
+            return await self.hass.async_add_executor_job(self.api.get_grades)
+        except Exception as e:  # noqa: BLE001
+            raise UpdateFailed(f"EDUPAGE error updating get_grades() data from API: {e}")
+
+    async def get_grades_for_term(self, year: int, term):
+        try:
+            return await self.hass.async_add_executor_job(
+                self.api.get_grades_for_term, year, term
+            )
+        except Exception as e:  # noqa: BLE001
+            raise UpdateFailed(
+                f"EDUPAGE error updating get_grades_for_term() data from API: {e}"
+            )
+
+    async def get_school_year(self):
+        try:
+            return await self.hass.async_add_executor_job(self.api.get_school_year)
+        except Exception as e:  # noqa: BLE001
+            raise UpdateFailed(
+                f"EDUPAGE error updating get_school_year() data from API: {e}"
+            )
 
     async def get_subjects(self):
-
         try:
-            all_subjects = await self.hass.async_add_executor_job(self.api.get_subjects)
-            return all_subjects
-        except Exception as e:
-            raise UpdateFailed(F"EDUPAGE error updating get_subjects() data from API: {e}")
+            return await self.hass.async_add_executor_job(self.api.get_subjects)
+        except Exception as e:  # noqa: BLE001
+            raise UpdateFailed(
+                f"EDUPAGE error updating get_subjects() data from API: {e}"
+            )
 
     async def get_notifications(self):
-
         try:
-            all_notifications = await self.hass.async_add_executor_job(self.api.get_notifications)
-            _LOGGER.debug(f"EDUPAGE Notifications found %s", all_notifications)
-            return all_notifications
-        except Exception as e:
-            raise UpdateFailed(F"EDUPAGE error updating get_notifications() data from API: {e}")
+            notifications = await self.hass.async_add_executor_job(
+                self.api.get_notifications
+            )
+            _LOGGER.debug("EDUPAGE Notifications found %s", notifications)
+            return notifications
+        except Exception as e:  # noqa: BLE001
+            raise UpdateFailed(
+                f"EDUPAGE error updating get_notifications() data from API: {e}"
+            )
+
+    async def get_timetable_changes(self, day: date):
+        try:
+            return await self.hass.async_add_executor_job(
+                self.api.get_timetable_changes, day
+            )
+        except Exception as e:  # noqa: BLE001
+            raise UpdateFailed(
+                f"EDUPAGE error updating get_timetable_changes() data for {day}: {e}"
+            )
+
+    async def get_missing_teachers(self, day: date):
+        try:
+            return await self.hass.async_add_executor_job(
+                self.api.get_missing_teachers, day
+            )
+        except Exception as e:  # noqa: BLE001
+            raise UpdateFailed(
+                f"EDUPAGE error updating get_missing_teachers() data for {day}: {e}"
+            )
+
+    async def get_next_ringing_time(self, day_time: datetime):
+        try:
+            return await self.hass.async_add_executor_job(
+                self.api.get_next_ringing_time, day_time
+            )
+        except Exception as e:  # noqa: BLE001
+            raise UpdateFailed(
+                f"EDUPAGE error updating get_next_ringing_time() data from API: {e}"
+            )
 
     async def get_students(self):
-
         try:
-            all_students = await self.hass.async_add_executor_job(self.api.get_students)
-            return all_students
-        except Exception as e:
-            raise UpdateFailed(F"EDUPAGE error updating get_students() data from API: {e}")
+            return await self.hass.async_add_executor_job(self.api.get_students)
+        except Exception as e:  # noqa: BLE001
+            raise UpdateFailed(
+                f"EDUPAGE error updating get_students() data from API: {e}"
+            )
 
     async def get_user_id(self):
-
         try:
-            user_id_data = await self.hass.async_add_executor_job(self.api.get_user_id)
-            return user_id_data
-        except Exception as e:
-            raise UpdateFailed(F"EDUPAGE error updating get_user_id() data from API: {e}")
+            return await self.hass.async_add_executor_job(self.api.get_user_id)
+        except Exception as e:  # noqa: BLE001
+            raise UpdateFailed(
+                f"EDUPAGE error updating get_user_id() data from API: {e}"
+            )
 
-    async def get_classrooms(self):
-
+    async def get_timetable(self, edu_student, day: date):
         try:
-            all_classrooms = await self.hass.async_add_executor_job(self.api.get_classrooms)
-            return all_classrooms
-        except Exception as e:
-            raise UpdateFailed(F"EDUPAGE error updating get_classrooms data from API: {e}")
-
-    async def get_teachers(self):
-
-        try:
-            all_teachers = await self.hass.async_add_executor_job(self.api.get_teachers)
-            return all_teachers
-        except Exception as e:
-            raise UpdateFailed(F"EDUPAGE error updating get_teachers data from API: {e}")
-
-    async def get_timetable(self, EduStudent, date):
-        try:
-            timetable_data = await self.hass.async_add_executor_job(self.api.get_timetable, EduStudent, date)
-            if timetable_data is None:
-                _LOGGER.debug("EDUPAGE timetable is None")
+            timetable = await self.hass.async_add_executor_job(
+                self.api.get_timetable, edu_student, day
+            )
+            if timetable is None:
+                _LOGGER.debug("EDUPAGE timetable is None for %s", day)
             else:
-                _LOGGER.debug(f"EDUPAGE timetable_data for {date}: {timetable_data}")
-                return timetable_data
-        except Exception as e:
-            _LOGGER.error(f"EDUPAGE error updating get_timetable() data for {date}: {e}")
-            raise UpdateFailed(f"EDUPAGE error updating get_timetable() data for {date}: {e}")
+                _LOGGER.debug("EDUPAGE timetable_data for %s: %s", day, timetable)
+            return timetable
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.error("EDUPAGE error updating get_timetable() data for %s: %s", day, e)
+            raise UpdateFailed(f"EDUPAGE error updating get_timetable() data for {day}: {e}")
 
-    async def get_meals(self, date):
+    async def get_meals(self, day: date):
         try:
-            meals_data = await self.hass.async_add_executor_job(self.api.get_meals, date)
-            if meals_data is None:
-                _LOGGER.debug("EDUPAGE meals is None")
+            meals = await self.hass.async_add_executor_job(self.api.get_meals, day)
+            if meals is None:
+                _LOGGER.debug("EDUPAGE meals is None for %s", day)
             else:
-                _LOGGER.debug(f"EDUPAGE meals_data for {date}: {meals_data}")
-                return meals_data
-        except Exception as e:
-            _LOGGER.error(f"EDUPAGE error updating get_meals() data for {date}: {e}")
-            raise UpdateFailed(f"EDUPAGE error updating get_meals() data for {date}: {e}")
+                _LOGGER.debug("EDUPAGE meals for %s: %s", day, meals)
+            return meals
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.error("EDUPAGE error updating get_meals() data for %s: %s", day, e)
+            raise UpdateFailed(f"EDUPAGE error updating get_meals() data for {day}: {e}")
 
-    async def async_update(self):
+    # ------------------------------------------------------------------
+    # Action methods used by services
+    # ------------------------------------------------------------------
 
-        pass
+    async def choose_meal(self, meal, number: int):
+        try:
+            await self.hass.async_add_executor_job(meal.choose, self.api, number)
+        except Exception as e:  # noqa: BLE001
+            raise UpdateFailed(f"EDUPAGE error choosing meal: {e}")
+
+    async def sign_off_meal(self, meal):
+        try:
+            await self.hass.async_add_executor_job(meal.sign_off, self.api)
+        except Exception as e:  # noqa: BLE001
+            raise UpdateFailed(f"EDUPAGE error signing off meal: {e}")
+
+    async def rate_meal(self, rating, quantity: int, quality: int):
+        try:
+            await self.hass.async_add_executor_job(
+                rating.rate, self.api, quantity, quality
+            )
+        except Exception as e:  # noqa: BLE001
+            raise UpdateFailed(f"EDUPAGE error rating meal: {e}")
+
+    async def send_message(self, recipients, body: str):
+        try:
+            return await self.hass.async_add_executor_job(
+                self.api.send_message, recipients, body
+            )
+        except Exception as e:  # noqa: BLE001
+            raise UpdateFailed(f"EDUPAGE error sending message: {e}")

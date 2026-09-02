@@ -50,8 +50,7 @@
       "already_configured": "Zariadenie už je nakonfigurované",
       "no_students_found": "Na tomto účte sa nenašli žiadni študenti.",
       "reconfigured": "Uložená relácia bola úspešne aktualizovaná.",
-      "reconfigure_failed": "Opätovné overenie zlyhalo: {error}",
-      "reauth_successful": "Úspešné opätovné overenie"
+      "reconfigure_failed": "Opätovné overenie zlyhalo: {error}"
     }
   }
 }

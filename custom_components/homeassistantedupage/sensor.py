@@ -1,5 +1,7 @@
 import logging
 import re
+from datetime import datetime
+
 from unidecode import unidecode
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
@@ -11,12 +13,35 @@ from collections import defaultdict
 
 _LOGGER = logging.getLogger("custom_components.homeassistant_edupage")
 
+# Bound on the number of events exposed in the "events" state attribute, to
+# keep stored state attributes from growing without limit over time.
+_MAX_EVENTS = 50
+
 def group_grades_by_subject(grades):
     """grouping grades based on subject_id."""
     grouped = defaultdict(list)
     for grade in grades:
         grouped[grade.subject_id].append(grade)
     return grouped
+
+def _grade_numeric(grade_n):
+    """Best-effort numeric conversion of a grade value for averaging."""
+    if grade_n is None:
+        return None
+    if isinstance(grade_n, (int, float)):
+        return float(grade_n)
+    try:
+        return float(str(grade_n).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+
+def _average(grades):
+    """Weighted-agnostic arithmetic mean of numeric grade values."""
+    values = [v for v in (_grade_numeric(g.grade_n) for g in grades) if v is not None]
+    return round(sum(values) / len(values), 2) if values else None
+
+def _subject_slug(name):
+    return unidecode(name).replace(" ", "_").lower()
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     """Set up EduPage sensors for each student and their grades."""
@@ -33,26 +58,57 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
     for subject in subjects:
         subject_grades = grades_by_subject.get(subject.subject_id, [])
-        sensor = EduPageSubjectSensor(
+        sensors.append(
+            EduPageSubjectSensor(
+                coordinator,
+                student.get("id"),
+                student.get("name"),
+                subject.name,
+                subject_grades,
+            )
+        )
+
+    sensors.append(
+        EduPageNotificationSensor(
+            coordinator, student.get("id"), student.get("name"), notifications
+        )
+    )
+    sensors.append(
+        EduPageSubstitutionSensor(
+            coordinator, student.get("id"), student.get("name"), "timetable_changes"
+        )
+    )
+    sensors.append(
+        EduPageSubstitutionSensor(
+            coordinator, student.get("id"), student.get("name"), "missing_teachers"
+        )
+    )
+    sensors.append(
+        EduPageRingingSensor(coordinator, student.get("id"), student.get("name"))
+    )
+    sensors.append(
+        EduPageTermAverageSensor(
             coordinator,
             student.get("id"),
             student.get("name"),
-            subject.name,
-            subject_grades
+            school_year=coordinator.data.get("school_year"),
+            term_key="first",
+            grades=coordinator.data.get("grades_per_term", {}).get("first", []),
         )
-        sensors.append(sensor)
-
-    notify = EduPageNotificationSensor(
-        coordinator,
-        student.get("id"),
-        student.get("name"),
-        notifications,
-        subjects
+    )
+    sensors.append(
+        EduPageTermAverageSensor(
+            coordinator,
+            student.get("id"),
+            student.get("name"),
+            school_year=coordinator.data.get("school_year"),
+            term_key="second",
+            grades=coordinator.data.get("grades_per_term", {}).get("second", []),
+        )
     )
 
-    sensors.append(notify)
-
     async_add_entities(sensors, True)
+
 
 class EduPageSubjectSensor(CoordinatorEntity, SensorEntity):
     """Subject sensor entity for a specific student."""
@@ -62,16 +118,14 @@ class EduPageSubjectSensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
 
         self._student_id = student_id
-        self._student_name = unidecode(student_name).replace(' ', '_').lower()
-        self._subject_name = unidecode(subject_name).replace(' ', '_').lower()
+        self._student_name = _subject_slug(student_name)
+        self._subject_name = _subject_slug(subject_name)
         self._grades = grades or []
 
         self._attr_name = f"Edupage - {student_name} - {subject_name}"
-        self._name = self._attr_name
+        self._attr_state_class = "measurement"
 
         self._unique_id = f"edupage_subject_{self._student_id}_{self._student_name}_{self._subject_name}"
-
-        _LOGGER.info("SENSOR unique_id %s", self._unique_id)
 
     @property
     def unique_id(self):
@@ -86,15 +140,16 @@ class EduPageSubjectSensor(CoordinatorEntity, SensorEntity):
     @property
     def extra_state_attributes(self):
         """Return additional attributes."""
-        if not self._grades:
-            return {"info": "no grades yet"}
-
-        attributes = {}
-
         attributes = {
             "student": self.coordinator.data.get("student", {}),
-            "unique_id": self._unique_id
-            }
+            "unique_id": self._unique_id,
+            "grade_count": len(self._grades),
+            "grade_average": _average(self._grades),
+        }
+
+        if not self._grades:
+            attributes["info"] = "no grades yet"
+            return attributes
 
         for i, grade in enumerate(self._grades):
             attributes[f"grade_{i+1}_title"] = grade.title
@@ -108,30 +163,26 @@ class EduPageSubjectSensor(CoordinatorEntity, SensorEntity):
             if grade.comment:
                 attributes[f"grade_{i+1}_comment"] = grade.comment
             attributes[f"grade_{i+1}_date"] = grade.date.strftime("%Y-%m-%d %H:%M:%S")
-
             teacher_name = grade.teacher.name if grade.teacher else "unknown"
             attributes[f"grade_{i+1}_teacher"] = teacher_name
 
         return attributes
 
-class EduPageNotificationSensor(CoordinatorEntity, SensorEntity):
-    """Subject sensor entity for a specific student."""
 
-    def __init__(self, coordinator, student_id, student_name, notifications, subjects):
+class EduPageNotificationSensor(CoordinatorEntity, SensorEntity):
+    """Notification sensor for a specific student (counts all event types)."""
+
+    def __init__(self, coordinator, student_id, student_name, notifications):
         """Initialize the sensor."""
         super().__init__(coordinator)
 
         self._notifications = notifications
         self._student_id = student_id
-        self._student_name = unidecode(student_name).replace(' ', '_').lower()
+        self._student_name = _subject_slug(student_name)
 
         self._attr_name = f"Edupage - Notification {student_name}"
-        self._name = self._attr_name
 
         self._unique_id = f"edupage_notification_{self._student_id}_{self._student_name}"
-        self._subjects = {subject.subject_id: subject.name for subject in subjects}
-
-        _LOGGER.info("SENSOR unique_id %s", self._unique_id)
 
     @property
     def unique_id(self):
@@ -151,67 +202,200 @@ class EduPageNotificationSensor(CoordinatorEntity, SensorEntity):
     @property
     def extra_state_attributes(self):
         """Return additional attributes."""
-
-        attributes = {}
-
         notifications = self._current_notifications
-
         attributes = {
             "student": self.coordinator.data.get("student", {}),
             "unique_id": self._unique_id,
             "event_count": len(notifications),
-            }
+        }
 
-        # Homework events, one flat attribute set per event (kept for
-        # backwards compatibility with earlier versions).
-        for i, event in enumerate(notifications):
-            if event.event_type == EventType.HOMEWORK:
-                attributes[f"event_{i+1}_id"] = event.event_id
-                attributes[f"event_{i+1}_text"] = event.text
-                attributes[f"event_{i+1}_timestamp"] = event.timestamp.strftime("%Y-%m-%d %H:%M:%S")
-                attributes[f"event_{i+1}_deadline"] = event.additional_data.get("date") if event.additional_data else None
-                author_name = event.author if event.author else "no author"
-                attributes[f"event_{i+1}_author"] = author_name
-                attributes[f"event_{i+1}_subject"] = self._subject_name_from_event(event)
+        # Per-type breakdown of all notification types.
+        type_counts = defaultdict(int)
+        for event in notifications:
+            event_type = getattr(event.event_type, "value", None) or str(event.event_type)
+            type_counts[event_type] += 1
+        attributes["type_counts"] = dict(type_counts)
 
-        # Structured, aggregated list of recent events (any type) - convenient
-        # for templates and dashboards, e.g. `state_attr(..., 'events')`.
-        # Capped to keep stored state attributes bounded.
+        # Structured, aggregated list of recent events — convenient for templates
+        # and dashboards (e.g. `state_attr(..., 'events')`). Capped to keep
+        # stored state attributes bounded over time.
         events = []
         for event in notifications[:_MAX_EVENTS]:
             item = {
                 "id": event.event_id,
-                "type": event.event_type,
+                "type": getattr(event.event_type, "value", None) or str(event.event_type),
                 "text": event.text,
                 "timestamp": event.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
             }
             if event.additional_data:
                 if "date" in event.additional_data:
                     item["deadline"] = event.additional_data["date"]
-            subject_name = self._subject_name_from_event(event)
-            if subject_name:
-                item["subject"] = subject_name
+                if "predmetid" in event.additional_data:
+                    subject_id = event.additional_data["predmetid"]
+                    item["subject"] = self._subject_name_by_id(subject_id)
             if event.author:
-                item["author"] = event.author
+                item["author"] = (
+                    event.author.name if hasattr(event.author, "name") else event.author
+                )
             events.append(item)
         attributes["events"] = events
 
+        for i, event in enumerate(notifications):
+            attributes[f"event_{i+1}_id"] = event.event_id
+            attributes[f"event_{i+1}_type"] = (
+                getattr(event.event_type, "value", None) or str(event.event_type)
+            )
+            attributes[f"event_{i+1}_text"] = event.text
+            attributes[f"event_{i+1}_timestamp"] = event.timestamp.strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            if event.additional_data:
+                if "date" in event.additional_data:
+                    attributes[f"event_{i+1}_deadline"] = event.additional_data["date"]
+                if "predmetid" in event.additional_data:
+                    subject_id = event.additional_data["predmetid"]
+                    subject_name = self._subject_name_by_id(subject_id)
+                    attributes[f"event_{i+1}_subject"] = subject_name
+            if event.author:
+                author_name = event.author.name if hasattr(event.author, "name") else event.author
+                attributes[f"event_{i+1}_author"] = author_name
+
         return attributes
 
-    def _subject_name_from_event(self, event):
-        """Resolve the subject name for an event, tolerating missing/non-numeric IDs."""
-        subject_id = event.additional_data.get("predmetid") if event.additional_data else None
-        if subject_id is None:
-            return None
-        try:
-            return self._subjects.get(int(subject_id))
-        except (TypeError, ValueError):
-            return None
-
-class EventType:
-    HOMEWORK = 'homework'
+    def _subject_name_by_id(self, subject_id):
+        for subject in self.coordinator.data.get("subjects", []):
+            if subject.subject_id == subject_id:
+                return subject.name
+        return None
 
 
-# Bound on the number of events exposed in the "events" state attribute, to
-# keep stored state attributes from growing without limit over time.
-_MAX_EVENTS = 50
+class EduPageSubstitutionSensor(CoordinatorEntity, SensorEntity):
+    """Sensor for timetable changes or missing teachers for the current day."""
+
+    def __init__(self, coordinator, student_id, student_name, data_key):
+        """data_key is 'timetable_changes' or 'missing_teachers'."""
+        super().__init__(coordinator)
+
+        self._student_id = student_id
+        self._student_name = _subject_slug(student_name)
+        self._data_key = data_key
+        label = "Timetable Changes" if data_key == "timetable_changes" else "Missing Teachers"
+
+        self._attr_name = f"Edupage - {label} {student_name}"
+
+        self._unique_id = f"edupage_{data_key}_{self._student_id}_{self._student_name}"
+
+    @property
+    def unique_id(self):
+        """Return a unique identifier for this sensor."""
+        return self._unique_id
+
+    @property
+    def state(self):
+        return len(self.coordinator.data.get(self._data_key, []))
+
+    @property
+    def extra_state_attributes(self):
+        entries = self.coordinator.data.get(self._data_key, [])
+        attributes = {
+            "student": self.coordinator.data.get("student", {}),
+            "unique_id": self._unique_id,
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "count": len(entries),
+            "last_updated": self.coordinator.data.get("last_updated"),
+        }
+        if self._data_key == "timetable_changes":
+            for i, change in enumerate(entries):
+                attributes[f"change_{i+1}_class"] = change.change_class
+                attributes[f"change_{i+1}_lesson"] = change.lesson_n
+                attributes[f"change_{i+1}_title"] = change.title
+                attributes[f"change_{i+1}_action"] = change.action
+        else:
+            for i, teacher in enumerate(entries):
+                attributes[f"teacher_{i+1}_name"] = teacher.name
+                attributes[f"teacher_{i+1}_id"] = teacher.person_id
+        return attributes
+
+
+class EduPageRingingSensor(CoordinatorEntity, SensorEntity):
+    """Sensor exposing the next school-bell ringing time."""
+
+    def __init__(self, coordinator, student_id, student_name):
+        super().__init__(coordinator)
+        self._student_id = student_id
+        self._student_name = _subject_slug(student_name)
+        self._attr_name = f"Edupage - Next Ringing {student_name}"
+        self._unique_id = f"edupage_next_ringing_{self._student_id}_{self._student_name}"
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def state(self):
+        ringing = self.coordinator.data.get("next_ringing")
+        if ringing is None:
+            return "unknown"
+        return ringing.time.strftime("%H:%M")
+
+    @property
+    def extra_state_attributes(self):
+        ringing = self.coordinator.data.get("next_ringing")
+        attrs = {
+            "student": self.coordinator.data.get("student", {}),
+            "unique_id": self._unique_id,
+        }
+        if ringing is not None:
+            attrs["ringing_type"] = ringing.type.name
+            attrs["time"] = ringing.time.strftime("%H:%M")
+            attrs["date"] = datetime.now().strftime("%Y-%m-%d")
+        return attrs
+
+
+class EduPageTermAverageSensor(CoordinatorEntity, SensorEntity):
+    """Sensor showing grade count and average for a specific school term."""
+
+    def __init__(self, coordinator, student_id, student_name, school_year, term_key, grades):
+        super().__init__(coordinator)
+        self._student_id = student_id
+        self._student_name = _subject_slug(student_name)
+        self._school_year = school_year
+        self._term_key = term_key
+        self._grades = grades or []
+        term_label = "1st" if term_key == "first" else "2nd"
+
+        self._attr_name = f"Edupage - {term_label} Term Average {student_name}"
+
+        self._unique_id = (
+            f"edupage_term_{term_key}_{self._student_id}_{self._student_name}"
+        )
+
+    @property
+    def unique_id(self):
+        return self._unique_id
+
+    @property
+    def state(self):
+        avg = _average(self._grades)
+        return avg if avg is not None else "unknown"
+
+    @property
+    def extra_state_attributes(self):
+        by_subject = defaultdict(list)
+        for grade in self._grades:
+            by_subject[grade.subject_name or grade.subject_id].append(grade)
+
+        subject_averages = {
+            str(subject): _average(subject_grades)
+            for subject, subject_grades in by_subject.items()
+        }
+
+        return {
+            "student": self.coordinator.data.get("student", {}),
+            "unique_id": self._unique_id,
+            "school_year": self._school_year,
+            "term": self._term_key,
+            "grade_count": len(self._grades),
+            "grade_average": _average(self._grades),
+            "subject_averages": subject_averages,
+        }
