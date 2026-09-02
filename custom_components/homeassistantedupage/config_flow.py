@@ -347,9 +347,13 @@ class EdupageConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         cookies = api.session.cookies.get_dict()
         phpsess = cookies.get("PHPSESSID")
         if not phpsess:
+            # A failed or incomplete login must never be reported as a
+            # successful reauthentication.
             _LOGGER.error("EduPage re-login did not yield a session.")
-            reason = "reauth_successful" if self._reauth else "reconfigure_failed"
-            return self.async_abort(reason=reason)
+            return self.async_show_form(
+                step_id="reconfigure",
+                errors={"base": "cannot_connect"},
+            )
         reason = "reauth_successful" if self._reauth else "reconfigured"
         return self.async_update_reload_and_abort(
             entry,

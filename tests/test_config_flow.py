@@ -103,12 +103,21 @@ async def test_reauth_success_aborts_and_reloads_entry(hass: HomeAssistant):
 
     api = _api_logged_in()
 
+    recorded = {}
+
+    def _fake_reload(self, _entry, data_updates=None, reason=None):
+        # Capture the exact arguments so we can assert the update+reload path.
+        recorded["entry_id"] = _entry.entry_id
+        recorded["data_updates"] = data_updates
+        recorded["reason"] = reason
+        return self.async_abort(reason=reason)
+
     with patch(
         "custom_components.homeassistantedupage.config_flow.Edupage",
         return_value=api,
     ), patch(
         "homeassistant.config_entries.ConfigFlow.async_update_reload_and_abort",
-        return_value=MagicMock(),
+        _fake_reload,
     ):
         result = await hass.config_entries.flow.async_init(
             DOMAIN,
@@ -116,8 +125,17 @@ async def test_reauth_success_aborts_and_reloads_entry(hass: HomeAssistant):
         )
 
     assert result["type"] is data_entry_flow.FlowResultType.ABORT
-    # The abort reason for a successful reauth is used.
+    # A valid session produces the success reason.
     assert result["reason"] == "reauth_successful"
+    # The reload-and-abort path was actually invoked.
+    assert recorded == {
+        "entry_id": "test_entry",
+        "data_updates": {CONF_PHPSESSID: "phpsess_123"},
+        "reason": "reauth_successful",
+    }
+    # The existing entry is updated in place; it is not replaced by a new one.
+    assert len(hass.config_entries._entries) == 1
+    assert hass.config_entries._entries[0].entry_id == "test_entry"
 
 
 async def test_reconfigure_uses_reload(hass: HomeAssistant):
