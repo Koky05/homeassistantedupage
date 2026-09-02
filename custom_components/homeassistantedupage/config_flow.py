@@ -30,6 +30,10 @@ class EdupageConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    def __init__(self) -> None:
+        """Initialise the flow."""
+        self._reauth = False
+
     async def async_step_user(self, user_input=None):
         """Handle the initial step: username / password / subdomain."""
         errors = {}
@@ -155,7 +159,6 @@ class EdupageConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="two_factor",
             data_schema=schema,
             errors=errors,
-            description_placeholders={"hint": "Enter the confirmation code from the EduPage app."},
         )
 
     async def _finalize_setup(self, api, user_input):
@@ -204,8 +207,21 @@ class EdupageConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # Reconfigure flow (for when a stored session expires)
     # ------------------------------------------------------------------
 
+    async def async_step_reauth(self, user_input=None):
+        """Triggered when Home Assistant detects an expired/invalid stored session.
+
+        Reuses the reconfigure flow, which re-logs-in (prompting for a 2FA code
+        if the account has 2FA enabled), updates the stored PHPSESSID and reloads
+        the config entry. Completed as a reauthentication so the user is not
+        asked to re-enter their credentials.
+        """
+        self._reauth = True
+        return await self.async_step_reconfigure(user_input)
+
     async def async_step_reconfigure(self, user_input=None):
         """Re-login (with 2FA if required) to refresh an expired stored session."""
+        if not self._reauth:
+            self._reauth = False
         entry = self._get_reconfigure_entry()
         if entry is None:
             return self.async_abort(reason="already_configured")
@@ -323,16 +339,22 @@ class EdupageConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def _apply_reconfigure(self, api):
-        """Update the entry with a freshly-obtained PHPSESSID."""
+        """Update the entry with a freshly-obtained PHPSESSID and reload it."""
         entry = self._reconfig_entry
         if entry is None:
             return self.async_abort(reason="already_configured")
         cookies = api.session.cookies.get_dict()
         phpsess = cookies.get("PHPSESSID")
-        new_data = dict(entry.data)
-        new_data[CONF_PHPSESSID] = phpsess
-        self.hass.config_entries.async_update_entry(entry, data=new_data)
-        return self.async_abort(reason="reconfigured")
+        if not phpsess:
+            _LOGGER.error("EduPage re-login did not yield a session.")
+            reason = "reauth_successful" if self._reauth else "reconfigure_failed"
+            return self.async_abort(reason=reason)
+        reason = "reauth_successful" if self._reauth else "reconfigured"
+        return self.async_update_reload_and_abort(
+            entry,
+            data_updates={CONF_PHPSESSID: phpsess},
+            reason=reason,
+        )
 
     @callback
     def _get_reconfigure_entry(self):

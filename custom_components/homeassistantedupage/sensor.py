@@ -139,9 +139,14 @@ class EduPageNotificationSensor(CoordinatorEntity, SensorEntity):
         return self._unique_id
 
     @property
+    def _current_notifications(self):
+        """Return the latest notifications from the coordinator."""
+        return self.coordinator.data.get("notifications", [])
+
+    @property
     def state(self):
         """Return state."""
-        return len(self._notifications)
+        return len(self._current_notifications)
 
     @property
     def extra_state_attributes(self):
@@ -149,12 +154,17 @@ class EduPageNotificationSensor(CoordinatorEntity, SensorEntity):
 
         attributes = {}
 
+        notifications = self._current_notifications
+
         attributes = {
             "student": self.coordinator.data.get("student", {}),
-            "unique_id": self._unique_id
+            "unique_id": self._unique_id,
+            "event_count": len(notifications),
             }
 
-        for i, event in enumerate(self._notifications):
+        # Homework events, one flat attribute set per event (kept for
+        # backwards compatibility with earlier versions).
+        for i, event in enumerate(notifications):
             if event.event_type == EventType.HOMEWORK:
                 attributes[f"event_{i+1}_id"] = event.event_id
                 attributes[f"event_{i+1}_text"] = event.text
@@ -162,13 +172,13 @@ class EduPageNotificationSensor(CoordinatorEntity, SensorEntity):
                 attributes[f"event_{i+1}_deadline"] = event.additional_data.get("date") if event.additional_data else None
                 author_name = event.author if event.author else "no author"
                 attributes[f"event_{i+1}_author"] = author_name
-                subject = event.additional_data.get("predmetid") if event.additional_data else None
-                attributes[f"event_{i+1}_subject"] = self._subjects.get(int(subject)) if subject else None
+                attributes[f"event_{i+1}_subject"] = self._subject_name_from_event(event)
 
-        # Structured, aggregated list of all events (any type) - convenient for
-        # templates and dashboards, e.g. `state_attr(..., 'events')`.
+        # Structured, aggregated list of recent events (any type) - convenient
+        # for templates and dashboards, e.g. `state_attr(..., 'events')`.
+        # Capped to keep stored state attributes bounded.
         events = []
-        for event in self._notifications:
+        for event in notifications[:_MAX_EVENTS]:
             item = {
                 "id": event.event_id,
                 "type": event.event_type,
@@ -178,10 +188,9 @@ class EduPageNotificationSensor(CoordinatorEntity, SensorEntity):
             if event.additional_data:
                 if "date" in event.additional_data:
                     item["deadline"] = event.additional_data["date"]
-                if "predmetid" in event.additional_data:
-                    subject_name = self._subjects.get(int(event.additional_data["predmetid"]))
-                    if subject_name:
-                        item["subject"] = subject_name
+            subject_name = self._subject_name_from_event(event)
+            if subject_name:
+                item["subject"] = subject_name
             if event.author:
                 item["author"] = event.author
             events.append(item)
@@ -189,5 +198,20 @@ class EduPageNotificationSensor(CoordinatorEntity, SensorEntity):
 
         return attributes
 
+    def _subject_name_from_event(self, event):
+        """Resolve the subject name for an event, tolerating missing/non-numeric IDs."""
+        subject_id = event.additional_data.get("predmetid") if event.additional_data else None
+        if subject_id is None:
+            return None
+        try:
+            return self._subjects.get(int(subject_id))
+        except (TypeError, ValueError):
+            return None
+
 class EventType:
     HOMEWORK = 'homework'
+
+
+# Bound on the number of events exposed in the "events" state attribute, to
+# keep stored state attributes from growing without limit over time.
+_MAX_EVENTS = 50

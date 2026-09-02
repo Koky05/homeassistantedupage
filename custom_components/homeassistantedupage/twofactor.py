@@ -21,6 +21,7 @@ so the installed library is never patched.
 
 import json
 import logging
+from urllib.parse import urljoin
 
 from edupage_api import Login
 from edupage_api.compression import RequestData
@@ -82,12 +83,9 @@ class EdupageTwoFactor:
             )
 
         redirect_url = parsed.get("redirectUrl")
-        if redirect_url and not redirect_url.startswith(("http", "/")):
-            redirect_url = "/" + redirect_url
+        final_url = urljoin(base_url, redirect_url or "/user/")
 
-        final = self.api.session.get(
-            f"{base_url}{redirect_url}" if redirect_url else f"{base_url}/user/"
-        )
+        final = self.api.session.get(final_url)
 
         cookies = self.api.session.cookies.get_dict(
             f"{self.api.subdomain}.edupage.org"
@@ -218,8 +216,8 @@ def start_two_factor(api, username, password, subdomain):
     if not redirect_url:
         raise BadCredentialsException("EduPage did not redirect to two-factor")
 
-    target = redirect_url if redirect_url.startswith(("http", "/")) else "/" + redirect_url
-    page = api.session.get(f"{base_url}{target}" if target.startswith("/") else target)
+    page_url = urljoin(base_url, redirect_url)
+    page = api.session.get(page_url)
 
     props = _extract_props(page.text)
     if not props:

@@ -1,7 +1,11 @@
 import logging
 import asyncio
 from datetime import datetime, timedelta
-from edupage_api.exceptions import BadCredentialsException, CaptchaException
+from edupage_api.exceptions import (
+    BadCredentialsException,
+    CaptchaException,
+    SecondFactorFailedException,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -38,6 +42,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     except BadCredentialsException as e:
         _LOGGER.error("INIT login failed: bad credentials. %s", e)
+        await hass.config_entries.async_reauth(entry.entry_id)
+        return False
+
+    except SecondFactorFailedException as e:
+        _LOGGER.error("INIT login failed: second factor failed. %s", e)
+        await hass.config_entries.async_reauth(entry.entry_id)
         return False
 
     except CaptchaException as e:
@@ -139,6 +149,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 }
                 _LOGGER.debug(f"INIT Coordinator fetch_data returning: {return_data}")
                 return return_data
+
+            except BadCredentialsException as e:
+                _LOGGER.error("INIT login failed during update: bad credentials. %s", e)
+                await hass.config_entries.async_reauth(entry.entry_id)
+                return {}
+
+            except SecondFactorFailedException as e:
+                _LOGGER.error("INIT login failed during update: second factor failed. %s", e)
+                await hass.config_entries.async_reauth(entry.entry_id)
+                return {}
+
+            except CaptchaException as e:
+                _LOGGER.error("INIT login failed during update: CAPTCHA needed. %s", e)
+                return {}
 
             except Exception as e:
                 _LOGGER.error("INIT Failed: %s", e)

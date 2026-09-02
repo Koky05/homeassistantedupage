@@ -14,36 +14,24 @@ class Edupage:
         self.api = APIEdupage()
 
     async def login(self, username: str, password: str, subdomain: str):
-        """Perform login asynchronously."""
-        try:
-            result = True
-            login = Login(self.api)
+        """Perform login asynchronously.
+
+        Raises auth-related exceptions (BadCredentialsException, CaptchaException,
+        SecondFactorFailedException) upward so the caller can trigger
+        reauthentication, instead of swallowing them and returning False.
+        """
+        login = Login(self.api)
+        await self.hass.async_add_executor_job(
+            login.reload_data, subdomain, self.sessionid, username
+        )
+        if not self.api.is_logged_in:
+            # A stored session is no longer valid: fall back to a full login.
+            # For accounts with 2FA this prompts for a new confirmation code.
             await self.hass.async_add_executor_job(
-                login.reload_data, subdomain, self.sessionid, username
+                self.api.login, username, password, subdomain
             )
-            if not self.api.is_logged_in:
-                #TODO: how to handle 2FA at this point?!
-                result = await self.hass.async_add_executor_job(
-                    self.api.login, username, password, subdomain
-                )
-            _LOGGER.debug(f"EDUPAGE Login successful, result: {result}")
-            return result
-        except BadCredentialsException as e:
-            _LOGGER.error("EDUPAGE login failed: bad credentials. %s", e)
-            return False
-
-        except CaptchaException as e:
-            _LOGGER.error("EDUPAGE login failed: CAPTCHA needed. %s", e)
-            return False
-
-        except SecondFactorFailedException as e:
-            #TODO hier müsste man dann irgendwie abfangen, falls die session mal abgelaufen ist. und dies dann auch irgendwie via HA sauber zum Nutzer bringen!?
-            _LOGGER.error("EDUPAGE login failed: 2FA error. %s", e)
-            return False
-
-        except Exception as e:
-            _LOGGER.error("EDUPAGE unexpected login error: %s", e)
-            return False
+        _LOGGER.debug("EDUPAGE Login successful")
+        return True
 
     async def get_classes(self):
 
